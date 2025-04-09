@@ -1,0 +1,132 @@
+import boto3
+import botocore
+import datetime
+import csv
+
+def get_age_from_dt(dt):
+    """
+    Given a datetime object, compute a human-friendly age.
+    Returns strings like "15 days old", "2 months old", or "1 years old".
+    """
+    # Ensure the datetime has timezone information
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    delta = now - dt
+    days = delta.days
+    if days < 30:
+        return f"{days} days old"
+    elif days < 365:
+        months = days // 30
+        return f"{months} months old"
+    else:
+        years = days // 365
+        return f"{years} years old"
+
+def audit_rds_resources(profile_name):
+    session = boto3.Session(profile_name=profile_name)
+    rds_client = session.client('rds')
+
+    # ----------------------- RDS DB Instances ---------------------------
+    response = rds_client.describe_db_instances()
+    rds_instances = []
+
+    for db in response['DBInstances']:
+        db_id = db.get('DBInstanceIdentifier', 'N/A')
+        db_class = db.get('DBInstanceClass', 'N/A')
+        engine = db.get('Engine', 'N/A')
+        engine_version = db.get('EngineVersion', 'N/A')
+        status = db.get('DBInstanceStatus', 'N/A')
+        master = db.get('MasterUsername', 'N/A')
+        az = db.get('AvailabilityZone', 'N/A')
+        backup_retention = db.get('BackupRetentionPeriod', 'N/A')
+        multi_az = db.get('MultiAZ', 'N/A')
+        created_time = db.get('InstanceCreateTime')
+        age = get_age_from_dt(created_time) if created_time else "Unknown"
+
+        rds_instances.append({
+            "DBInstanceIdentifier": db_id,
+            "DBInstanceClass": db_class,
+            "Engine": engine,
+            "EngineVersion": engine_version,
+            "Status": status,
+            "MasterUsername": master,
+            "AvailabilityZone": az,
+            "BackupRetentionPeriod": backup_retention,
+            "MultiAZ": multi_az,
+            "Age": age
+        })
+
+    # Save RDS Instances audit to CSV
+    with open('rds_instances.csv', 'w', newline='') as f_rds:
+        writer = csv.writer(f_rds)
+        writer.writerow([
+            "DB Instance Identifier", "DB Instance Class", "Engine",
+            "Engine Version", "Status", "Master Username",
+            "Availability Zone", "Backup Retention Period", "MultiAZ", "Age"
+        ])
+        for db in rds_instances:
+            writer.writerow([
+                db["DBInstanceIdentifier"],
+                db["DBInstanceClass"],
+                db["Engine"],
+                db["EngineVersion"],
+                db["Status"],
+                db["MasterUsername"],
+                db["AvailabilityZone"],
+                db["BackupRetentionPeriod"],
+                db["MultiAZ"],
+                db["Age"]
+            ])
+
+    # ----------------------- RDS Snapshots ---------------------------
+    snapshot_response = rds_client.describe_db_snapshots()
+    rds_snapshots = []
+    for snapshot in snapshot_response['DBSnapshots']:
+        snapshot_id = snapshot.get('DBSnapshotIdentifier', 'N/A')
+        attached_rds = snapshot.get('DBInstanceIdentifier', 'N/A')
+        snapshot_create_time = snapshot.get('SnapshotCreateTime')
+        age = get_age_from_dt(snapshot_create_time) if snapshot_create_time else "Unknown"
+        snapshot_type = snapshot.get('SnapshotType', 'N/A')  # "manual" or "automated"
+        # Try to get a "CreatedBy" tag from TagList if present
+        created_by = "N/A"
+        if 'TagList' in snapshot:
+            created_by = next((tag.get('Value') 
+                               for tag in snapshot.get('TagList', []) 
+                               if tag.get('Key', '').lower() == 'createdby'), "N/A")
+        rds_snapshots.append({
+            "SnapshotID": snapshot_id,
+            "AttachedRDS": attached_rds,
+            "Age": age,
+            "CreatedBy": created_by,
+            "SnapshotType": snapshot_type,
+            "SnapshotCreateTime": snapshot_create_time  # for sorting purposes
+        })
+
+    # Sort RDS snapshots with the newest first
+    rds_snapshots = sorted(rds_snapshots, key=lambda x: x["SnapshotCreateTime"], reverse=True)
+
+    # Save RDS Snapshots audit to CSV
+    with open('rds_snapshots.csv', 'w', newline='') as f_snap:
+        writer = csv.writer(f_snap)
+        writer.writerow(["Snapshot ID", "Attached RDS", "Age (newest first)", "Created by", "Type (manual/awsgenerated)"])
+        for snap in rds_snapshots:
+            writer.writerow([
+                snap["SnapshotID"],
+                snap["AttachedRDS"],
+                snap["Age"],
+                snap["CreatedBy"],
+                snap["SnapshotType"]
+            ])
+
+    print("RDS audit completed. Output saved to:")
+    print("  rds_instances.csv")
+    print("  rds_snapshots.csv")
+
+if __name__ == '__main__':
+    PROFILE_NAME = "audit-readonly"  # Replace with your AWS profile name as set in .aws/config
+    try:
+        audit_rds_resources(PROFILE_NAME)
+    except botocore.exceptions.NoCredentialsError:
+        print("No credentials found. Please ensure your profile is set up correctly in .aws/config.")
+

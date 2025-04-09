@@ -1,0 +1,35 @@
+import subprocess
+import sys
+
+def main():
+    while True:
+        print("\nMaster Audit Menu")
+        print("------------------")
+        print("1. EC2 Audit")
+        print("2. RDS Audit")
+        print("3. Security Audit")
+        print("4. Monitoring Audit")
+        print("0. Exit")
+        choice = input("Choose the option to start: ").strip()
+
+        if choice == '1':
+            print("Starting EC2 Audit...")
+            subprocess.call(["python3", "ec2auditfull.py"])
+        elif choice == '2':
+            print("Starting RDS Audit...")
+            subprocess.call(["python3", "rdsaudit.py"])
+        elif choice == '3':
+            print("Starting Security Audit...")
+            subprocess.call(["python3", "sgaudit.py"])
+        elif choice == '4':
+            print("Starting Monitoring Audit...")
+            subprocess.call(["python3", "cwaudit.py"])
+        elif choice == '0':
+            print("Exiting...")
+            sys.exit(0)
+        else:
+            print("Invalid option. Please choose a valid option.")
+
+if __name__ == '__main__':
+    main()
+

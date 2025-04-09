@@ -1,0 +1,97 @@
+import boto3
+import botocore
+import csv
+import sys
+
+def audit_s3_buckets(profile_name):
+    # Start the session using the provided AWS profile
+    session = boto3.Session(profile_name=profile_name)
+    s3_client = session.client('s3')
+
+    # Open CSV file for writing
+    with open('s3_audit.csv', 'w', newline='') as f:
+        writer = csv.writer(f)
+        # CSV header
+        writer.writerow(["Bucket Name", "Storage Class", "Versioning", "Server Access Logging", 
+                         "Lifecycle Rule Name", "Lifecycle Rule Status"])
+
+        # List all S3 buckets
+        buckets_response = s3_client.list_buckets()
+        buckets = buckets_response.get("Buckets", [])
+
+        # Iterate over each bucket
+        for bucket in buckets:
+            bucket_name = bucket.get("Name", "N/A")
+            
+            # Set default values
+            storage_class = "N/A"  # Bucket-level storage class is not applicable.
+            versioning_status = "Disabled"
+            logging_status = "Disabled"
+            lifecycle_rule_name = "Not Configured"
+            lifecycle_rule_status = "Not Configured"
+
+            # Fetch versioning status
+            try:
+                versioning_response = s3_client.get_bucket_versioning(Bucket=bucket_name)
+                versioning_status = versioning_response.get("Status", "Disabled")
+            except botocore.exceptions.ClientError:
+                versioning_status = "Error"
+
+            # Fetch server access logging configuration
+            try:
+                logging_response = s3_client.get_bucket_logging(Bucket=bucket_name)
+                if "LoggingEnabled" in logging_response:
+                    logging_status = "Enabled"
+                else:
+                    logging_status = "Disabled"
+            except botocore.exceptions.ClientError:
+                logging_status = "Error"
+
+            # Fetch lifecycle configuration and determine if any rule is enabled
+            try:
+                lifecycle_response = s3_client.get_bucket_lifecycle_configuration(Bucket=bucket_name)
+                lifecycle_rules = lifecycle_response.get("Rules", [])
+                if lifecycle_rules:
+                    enabled_rule = None
+                    # Look for an enabled rule among all lifecycle rules
+                    for rule in lifecycle_rules:
+                        if rule.get("Status", "Disabled") == "Enabled":
+                            enabled_rule = rule
+                            break
+                    if enabled_rule:
+                        lifecycle_rule_name = enabled_rule.get("ID", "Unnamed")
+                        lifecycle_rule_status = enabled_rule.get("Status", "Disabled")
+                    else:
+                        # If there is at least one rule but none are enabled, report the first rule's data
+                        lifecycle_rule_name = lifecycle_rules[0].get("ID", "Unnamed")
+                        lifecycle_rule_status = lifecycle_rules[0].get("Status", "Disabled")
+                else:
+                    lifecycle_rule_name = "Not Configured"
+                    lifecycle_rule_status = "Not Configured"
+            except botocore.exceptions.ClientError as e:
+                error_code = e.response.get("Error", {}).get("Code", "")
+                if error_code == "NoSuchLifecycleConfiguration":
+                    lifecycle_rule_name = "Not Configured"
+                    lifecycle_rule_status = "Not Configured"
+                else:
+                    lifecycle_rule_name = "Error"
+                    lifecycle_rule_status = "Error"
+
+            # Write the row data for the current bucket
+            writer.writerow([bucket_name, storage_class, versioning_status, logging_status, 
+                             lifecycle_rule_name, lifecycle_rule_status])
+
+    print("S3 bucket audit completed. Output saved to s3_audit.csv")
+
+if __name__ == "__main__":
+    # Modified to accept the AWS profile as a command-line argument.
+    if len(sys.argv) != 2:
+        print("Usage: python3 s3audit.py <AWS_PROFILE>")
+        sys.exit(1)
+
+    PROFILE_NAME = sys.argv[1]
+    try:
+        audit_s3_buckets(PROFILE_NAME)
+    except botocore.exceptions.NoCredentialsError:
+        print("No credentials found. Please ensure your profile is set up correctly in .aws/config.")
+

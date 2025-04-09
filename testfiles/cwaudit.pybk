@@ -1,0 +1,155 @@
+import boto3
+import botocore
+import csv
+
+def audit_monitoring_resources(profile_name):
+    session = boto3.Session(profile_name=profile_name)
+
+    # Clients: EC2, RDS, ELBv2, and CloudWatch.
+    ec2_client = session.client('ec2')
+    rds_client = session.client('rds')
+    elbv2_client = session.client('elbv2')
+    cw_client = session.client('cloudwatch')
+
+    # -------------------------------------------------------------------------
+    # 1. Collect Resources
+    # -------------------------------------------------------------------------
+    # EC2 Instances.
+    ec2_response = ec2_client.describe_instances()
+    ec2_resources = []
+    for reservation in ec2_response.get("Reservations", []):
+        for instance in reservation.get("Instances", []):
+            instance_id = instance.get("InstanceId", "N/A")
+            instance_name = "N/A"
+            for tag in instance.get("Tags", []):
+                if tag.get("Key") == "Name":
+                    instance_name = tag.get("Value")
+                    break
+            ec2_resources.append({
+                "ResourceType": "EC2 Instance",
+                "ResourceId": instance_id,
+                "ResourceName": instance_name,
+                "Alarms": []  # To be filled later.
+            })
+
+    # RDS Instances.
+    rds_response = rds_client.describe_db_instances()
+    rds_resources = []
+    for db in rds_response.get("DBInstances", []):
+        db_id = db.get("DBInstanceIdentifier", "N/A")
+        # RDS often does not have a separate name tag so use the identifier.
+        rds_resources.append({
+            "ResourceType": "RDS Instance",
+            "ResourceId": db_id,
+            "ResourceName": db_id,
+            "Alarms": []
+        })
+
+    # Load Balancers.
+    lb_response = elbv2_client.describe_load_balancers()
+    lb_resources = []
+    for lb in lb_response.get("LoadBalancers", []):
+        # Use the ARN as the resource identifier and name.
+        lb_arn = lb.get("LoadBalancerArn", "N/A")
+        lb_name = lb.get("LoadBalancerName", "N/A")
+        lb_resources.append({
+            "ResourceType": "Load Balancer",
+            "ResourceId": lb_arn,
+            "ResourceName": lb_name,
+            "Alarms": []
+        })
+
+    # Target Groups.
+    tg_response = elbv2_client.describe_target_groups()
+    tg_resources = []
+    for tg in tg_response.get("TargetGroups", []):
+        tg_arn = tg.get("TargetGroupArn", "N/A")
+        tg_name = tg.get("TargetGroupName", "N/A")
+        tg_resources.append({
+            "ResourceType": "Target Group",
+            "ResourceId": tg_arn,
+            "ResourceName": tg_name,
+            "Alarms": []
+        })
+
+    # Combine all resources.
+    all_resources = ec2_resources + rds_resources + lb_resources + tg_resources
+
+    # -------------------------------------------------------------------------
+    # 2. Retrieve CloudWatch Alarms and build a mapping from resource dimension
+    #    values to alarm names.
+    # -------------------------------------------------------------------------
+    alarm_data = []
+    next_token = None
+    while True:
+        if next_token:
+            resp = cw_client.describe_alarms(NextToken=next_token)
+        else:
+            resp = cw_client.describe_alarms()
+        alarm_data.extend(resp.get("MetricAlarms", []))
+        next_token = resp.get("NextToken")
+        if not next_token:
+            break
+
+    # Build a mapping.
+    # We assume that an alarm’s Dimensions list will include one or more of the following:
+    #   • For EC2: "InstanceId"
+    #   • For RDS: "DBInstanceIdentifier"
+    #   • For Load Balancer: "LoadBalancer" (often the load balancer name)
+    #   • For Target Group: "TargetGroup"
+    resource_alarm_map = {}  # key: dimension value, value: set of alarm names
+    for alarm in alarm_data:
+        alarm_name = alarm.get("AlarmName", "N/A")
+        for dim in alarm.get("Dimensions", []):
+            dim_name = dim.get("Name", "")
+            dim_value = dim.get("Value", "")
+            if dim_name in ["InstanceId", "DBInstanceIdentifier", "LoadBalancer", "TargetGroup"]:
+                if dim_value not in resource_alarm_map:
+                    resource_alarm_map[dim_value] = set()
+                resource_alarm_map[dim_value].add(alarm_name)
+
+    # -------------------------------------------------------------------------
+    # 3. Associate alarms with the collected resources.
+    # -------------------------------------------------------------------------
+    for resource in all_resources:
+        res_id = resource["ResourceId"]
+        rtype = resource["ResourceType"]
+        # For EC2 and RDS, we use the resource identifier as is.
+        if rtype in ["EC2 Instance", "RDS Instance"]:
+            resource["Alarms"] = list(resource_alarm_map.get(res_id, []))
+        elif rtype == "Load Balancer":
+            # For ALB, CloudWatch dimension "LoadBalancer" is usually the load balancer name.
+            lb_name = resource["ResourceName"]
+            resource["Alarms"] = list(resource_alarm_map.get(lb_name, []))
+        elif rtype == "Target Group":
+            # For target groups, try both the ARN and the name.
+            alarms = set(resource_alarm_map.get(resource["ResourceId"], []))
+            alarms = alarms.union(resource_alarm_map.get(resource["ResourceName"], []))
+            resource["Alarms"] = list(alarms)
+
+    # -------------------------------------------------------------------------
+    # 4. Write the output to CSV.
+    # -------------------------------------------------------------------------
+    with open("monitoring_audit.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        # Write a top row indicating total number of resources audited.
+        writer.writerow([f"Total Resources Audited: {len(all_resources)}"])
+        writer.writerow(["Resource Type", "Resource ID", "Resource Name", "Alarms Configured"])
+        for resource in all_resources:
+            alarms_configured = ", ".join(sorted(resource["Alarms"])) if resource["Alarms"] else ""
+            writer.writerow([
+                resource["ResourceType"],
+                resource["ResourceId"],
+                resource["ResourceName"],
+                alarms_configured
+            ])
+
+    print("Monitoring audit completed. Output saved to monitoring_audit.csv")
+
+if __name__ == '__main__':
+    PROFILE_NAME = "audit-readonly"  # Replace with your AWS profile name as set in .aws/config
+    try:
+        audit_monitoring_resources(PROFILE_NAME)
+    except botocore.exceptions.NoCredentialsError:
+        print("No credentials found. Please ensure your profile is set up correctly in .aws/config.")
+
